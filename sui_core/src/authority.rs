@@ -455,7 +455,7 @@ impl AuthorityState {
     ) -> Result<
         (
             VecDeque<UpdateItem>,
-            // Should subscribe, computer start, computed end
+            // Should subscribe, computed start, computed end
             (bool, TxSequenceNumber, TxSequenceNumber),
         ),
         SuiError,

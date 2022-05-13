@@ -1,40 +1,84 @@
 use crate::authority::AuthorityState;
+use crate::authority_aggregator::AuthorityAggregator;
 use crate::authority_client::{AuthorityAPI, BatchInfoResponseItemStream};
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use sui_types::base_types::TransactionDigest;
+use sui_types::base_types::{ObjectID, TransactionDigest};
 use sui_types::batch::{AuthorityBatch, SignedBatch, TxSequenceNumber, UpdateItem};
+use sui_types::committee::Committee;
+use sui_types::crypto::{get_key_pair, KeyPair, PublicKeyBytes};
 use sui_types::error::SuiError;
 use sui_types::messages::{
     AccountInfoRequest, AccountInfoResponse, BatchInfoRequest, BatchInfoResponseItem,
     ConfirmationTransaction, ConsensusTransaction, ObjectInfoRequest, ObjectInfoResponse,
     Transaction, TransactionInfoRequest, TransactionInfoResponse,
 };
+use sui_types::object::Object;
 use tokio::time::{Duration, Instant};
+
+#[derive(Clone)]
+pub struct TestBatch {
+    pub start: TxSequenceNumber,
+    pub digests: Vec<TransactionDigest>,
+}
 
 #[derive(Clone)]
 pub enum BatchAction {
     DoNothing(Duration),
-    EmitBatch(TxSequenceNumber),
+    EmitUpdateItems(TestBatch),
 }
 
 #[derive(Clone)]
 pub struct ConfigurableBatchActionClient {
     state: Arc<AuthorityState>,
-    pub batch_size: i32,
     pub action_sequence: Vec<BatchAction>,
     test_time: Instant,
 }
 
 impl ConfigurableBatchActionClient {
-    pub fn new(state: Arc<AuthorityState>, batch_size: i32) -> Self {
+    #[cfg(test)]
+    pub async fn new(committee: Committee, address: PublicKeyBytes, secret: KeyPair) -> Self {
+        use crate::authority::AuthorityStore;
+        use std::{env, fs};
+        use sui_adapter::genesis;
+
+        // Random directory
+        let dir = env::temp_dir();
+        let path = dir.join(format!("DB_{:?}", ObjectID::random()));
+        fs::create_dir(&path).unwrap();
+
+        let store = Arc::new(AuthorityStore::open(path, None));
+        let state = AuthorityState::new(
+            committee.clone(),
+            address,
+            Arc::pin(secret),
+            store,
+            genesis::clone_genesis_compiled_modules(),
+            &mut genesis::get_genesis_context(),
+        )
+        .await;
+
         ConfigurableBatchActionClient {
-            state,
-            batch_size,
+            state: Arc::new(state),
             action_sequence: Vec::new(),
             test_time: Instant::now(),
         }
     }
+
+    #[cfg(test)]
+    pub async fn new_with_actions(
+        committee: Committee,
+        address: PublicKeyBytes,
+        secret: KeyPair,
+        actions: Vec<BatchAction>,
+    ) -> Self {
+        let mut client = Self::new(committee, address, secret).await;
+        client.register_action_sequence(actions);
+        client
+    }
+
+    #[cfg(test)]
     pub fn register_action_sequence(&mut self, action_sequence: Vec<BatchAction>) {
         self.action_sequence = action_sequence;
     }
@@ -44,13 +88,11 @@ impl ConfigurableBatchActionClient {
 impl AuthorityAPI for ConfigurableBatchActionClient {
     async fn handle_transaction(
         &self,
-        _transaction: Transaction,
+        transaction: Transaction,
     ) -> Result<TransactionInfoResponse, SuiError> {
-        Ok(TransactionInfoResponse {
-            signed_transaction: None,
-            certified_transaction: None,
-            signed_effects: None,
-        })
+        let state = self.state.clone();
+        let result = state.handle_transaction(transaction).await;
+        result
     }
 
     async fn handle_confirmation_transaction(
@@ -121,14 +163,16 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
 
         let _ = actions.into_iter().for_each(|action| {
             match action {
-                BatchAction::EmitBatch(start_seq) => {
-                    let mut seq = start_seq.clone();
+                BatchAction::EmitUpdateItems(test_batch) => {
+                    let mut temp_items: Vec<Result<BatchInfoResponseItem, SuiError>> = Vec::new();
+                    let start_seq = test_batch.start;
+                    let mut seq = start_seq;
                     let mut transactions = Vec::new();
-                    for _i in 0..self.batch_size {
-                        let rnd = TransactionDigest::random();
-                        transactions.push((seq, rnd));
-                        items.push(Ok(BatchInfoResponseItem(UpdateItem::Transaction((
-                            seq, rnd,
+                    for digest in test_batch.digests.clone() {
+                        transactions.push((seq, digest));
+                        // Safe client requires batches arrive first todo: discuss if that should be required.
+                        temp_items.push(Ok(BatchInfoResponseItem(UpdateItem::Transaction((
+                            seq, digest,
                         )))));
                         seq += 1;
                     }
@@ -138,6 +182,9 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
                         let item = SignedBatch::new(last_batch.clone(), &*secret, name);
                         Ok(BatchInfoResponseItem(UpdateItem::Batch(item)))
                     });
+                    for temp_item in temp_items {
+                        items.push(temp_item)
+                    }
                 }
                 BatchAction::DoNothing(_d) => {}
             };
@@ -145,4 +192,38 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
 
         Ok(Box::pin(tokio_stream::iter(items)))
     }
+}
+
+#[cfg(test)]
+pub async fn init_configurable_authorities(
+    authority_count: usize,
+    authority_actions: Vec<Vec<BatchAction>>,
+) -> (
+    AuthorityAggregator<ConfigurableBatchActionClient>,
+    Vec<Arc<AuthorityState>>,
+) {
+    let mut key_pairs = Vec::new();
+    let mut voting_rights = BTreeMap::new();
+    for _ in 0..authority_count {
+        let (_, key_pair) = get_key_pair();
+        let authority_name = *key_pair.public_key_bytes();
+        voting_rights.insert(authority_name, 1);
+        key_pairs.push((authority_name, key_pair));
+    }
+    let committee = Committee::new(0, voting_rights);
+
+    let mut clients = BTreeMap::new();
+    let mut states = Vec::new();
+    for ((authority_name, secret), actions) in key_pairs.into_iter().zip(authority_actions) {
+        let client = ConfigurableBatchActionClient::new_with_actions(
+            committee.clone(),
+            authority_name,
+            secret,
+            actions,
+        )
+        .await;
+        states.push(client.state.clone());
+        clients.insert(authority_name, client);
+    }
+    (AuthorityAggregator::new(committee, clients), states)
 }
