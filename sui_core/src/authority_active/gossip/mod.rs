@@ -6,6 +6,7 @@ use crate::{
     authority_client::AuthorityAPI, safe_client::SafeClient,
 };
 use futures::{stream::FuturesUnordered, StreamExt};
+use std::collections::HashMap;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use sui_types::{
     base_types::AuthorityName,
@@ -16,8 +17,6 @@ use sui_types::{
     },
 };
 use tokio::sync::oneshot::Receiver;
-
-use futures::stream::FuturesOrdered;
 use tracing::{debug, error, info};
 
 #[cfg(test)]
@@ -44,7 +43,7 @@ use super::ActiveAuthority;
 pub async fn gossip_process<A>(
     active_authority: &ActiveAuthority<A>,
     degree: usize,
-    //tr_cancellation: Receiver<()>,
+    mut cancel_all: Receiver<()>,
 ) where
     A: AuthorityAPI + Send + Sync + 'static + Clone,
 {
@@ -67,73 +66,91 @@ pub async fn gossip_process<A>(
     // Keep track of names of active peers
     let mut peer_names = HashSet::new();
     let mut gossip_tasks = FuturesUnordered::new();
+    let mut cancel_map = HashMap::new();
 
     loop {
-        let mut k = 0;
-        while gossip_tasks.len() < target_num_tasks {
-            let name = active_authority.state.committee.sample();
-            if peer_names.contains(name) {
-                continue;
+        tokio::select! {
+            _ = &mut cancel_all => {
+                for (_, tx_sender) in &mut cancel_map {
+                    let sender = tx_sender.take();
+                    _ = sender.unwrap().send(());
+                }
+                return;
             }
-            if *name == active_authority.state.name {
-                continue;
-            }
-            if !active_authority.can_contact(*name).await {
-                // Are we likely to never terminate because of this condition?
-                // - We check we have nodes left by stake
-                // - We check that we have at least 2/3 of nodes that can be contacted.
-                continue;
+            _ = async {
+            let mut k = 0;
+            while gossip_tasks.len() < target_num_tasks {
+                let name = active_authority.state.committee.sample();
+                if peer_names.contains(name) {
+                    continue;
+                }
+                if *name == active_authority.state.name {
+                    continue;
+                }
+                if !active_authority.can_contact(*name).await {
+                    // Are we likely to never terminate because of this condition?
+                    // - We check we have nodes left by stake
+                    // - We check that we have at least 2/3 of nodes that can be contacted.
+                    continue;
+                }
+
+                peer_names.insert(*name);
+                let (tx_cancellation, tr_cancellation) = tokio::sync::oneshot::channel();
+                cancel_map.insert(*name, Some(tx_cancellation));
+                gossip_tasks.push(async move {
+                    let peer_gossip = PeerGossip::new(*name, active_authority);
+                    // Add more duration if we make more than 1 to ensure overlap
+                    debug!("Starting gossip from peer {:?}", *name);
+                    peer_gossip
+                        .spawn(
+                            Duration::from_secs(REFRESH_FOLLOWER_PERIOD_SECS + k * 15),
+                            tr_cancellation,
+                        )
+                        .await
+                });
+                k += 1;
+
+                // If we have already used all the good stake, then stop here and
+                // wait for some node to become available.
+                let total_stake_used: usize = peer_names
+                    .iter()
+                    .map(|name| committee.weight(name))
+                    .sum::<usize>()
+                    + committee.weight(&active_authority.state.name);
+                if total_stake_used >= committee.quorum_threshold() {
+                    break;
+                }
+
+                // Find out what is the earliest time that we are allowed to reconnect
+                // to at least 2f+1 nodes.
+                let next_connect = active_authority
+                    .minimum_wait_for_majority_honest_available()
+                    .await;
+                debug!(
+                    "Waiting for {:?}",
+                    next_connect - tokio::time::Instant::now()
+                );
+                tokio::time::sleep_until(next_connect).await;
             }
 
-            peer_names.insert(*name);
-            gossip_tasks.push(async move {
-                let peer_gossip = PeerGossip::new(*name, active_authority);
-                // Add more duration if we make more than 1 to ensure overlap
-                debug!("Starting gossip from peer {:?}", *name);
-                peer_gossip
-                    .spawn(Duration::from_secs(REFRESH_FOLLOWER_PERIOD_SECS + k * 15))
-                    .await
-            });
-            k += 1;
-
-            // If we have already used all the good stake, then stop here and
-            // wait for some node to become available.
-            let total_stake_used: usize = peer_names
-                .iter()
-                .map(|name| committee.weight(name))
-                .sum::<usize>()
-                + committee.weight(&active_authority.state.name);
-            if total_stake_used >= committee.quorum_threshold() {
-                break;
+            // If we have no peers no need to wait for one
+            if gossip_tasks.is_empty() {
+                return; // TODO what to do here? This should not happen.
             }
 
-            // Find out what is the earliest time that we are allowed to reconnect
-            // to at least 2f+1 nodes.
-            let next_connect = active_authority
-                .minimum_wait_for_majority_honest_available()
-                .await;
-            debug!(
-                "Waiting for {:?}",
-                next_connect - tokio::time::Instant::now()
-            );
-            tokio::time::sleep_until(next_connect).await;
+            // Let the peer gossip task finish
+            let (finished_name, _result) = gossip_tasks.select_next_some().await;
+            if let Err(err) = _result {
+                active_authority.set_failure_backoff(finished_name).await;
+                error!("Peer {:?} returned error: {:?}", finished_name, err);
+            } else {
+                active_authority.set_success_backoff(finished_name).await;
+                debug!("End gossip from peer {:?}", finished_name);
+            }
+            peer_names.remove(&finished_name);
+            cancel_map.remove(&finished_name);
+            } => {}
         }
-
-        // If we have no peers no need to wait for one
-        if gossip_tasks.is_empty() {
-            return; // TODO what to do here? This should not happen.
-        }
-
-        // Let the peer gossip task finish
-        let (finished_name, _result) = gossip_tasks.select_next_some().await;
-        if let Err(err) = _result {
-            active_authority.set_failure_backoff(finished_name).await;
-            error!("Peer {:?} returned error: {:?}", finished_name, err);
-        } else {
-            active_authority.set_success_backoff(finished_name).await;
-            debug!("End gossip from peer {:?}", finished_name);
-        }
-        peer_names.remove(&finished_name);
     }
 }
 
@@ -151,10 +168,17 @@ where
         }
     }
 
-    pub async fn spawn(mut self, duration: Duration) -> (AuthorityName, Result<(), SuiError>) {
+    pub async fn spawn(
+        mut self,
+        duration: Duration,
+        tr_cancellation: Receiver<()>,
+    ) -> (AuthorityName, Result<(), SuiError>) {
         let peer_name = self.peer_name;
-        let result =
-            tokio::task::spawn(async move { self.peer_gossip_for_duration(duration).await }).await;
+        let result = tokio::task::spawn(async move {
+            self.peer_gossip_for_duration(duration, tr_cancellation)
+                .await
+        })
+        .await;
 
         if result.is_err() {
             return (
@@ -168,7 +192,11 @@ where
         (peer_name, result.unwrap())
     }
 
-    async fn peer_gossip_for_duration(&mut self, duration: Duration) -> Result<(), SuiError> {
+    async fn peer_gossip_for_duration(
+        &mut self,
+        duration: Duration,
+        mut tr_cancellation: Receiver<()>,
+    ) -> Result<(), SuiError> {
         // Global timeout, we do not exceed this time in this task.
         let mut timeout = Box::pin(tokio::time::sleep(duration));
 
@@ -181,6 +209,9 @@ where
 
         loop {
             tokio::select! {
+                _ = &mut tr_cancellation => {
+                    break;
+                }
                 _ = &mut timeout => {
                     // No matter what happens we do not spend too much time on any peer.
                     break },

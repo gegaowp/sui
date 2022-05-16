@@ -14,7 +14,6 @@ use sui_types::messages::{
     ConfirmationTransaction, ConsensusTransaction, ObjectInfoRequest, ObjectInfoResponse,
     Transaction, TransactionInfoRequest, TransactionInfoResponse,
 };
-use sui_types::object::Object;
 use tokio::time::{Duration, Instant};
 
 #[derive(Clone)]

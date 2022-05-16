@@ -14,7 +14,7 @@ use sui_types::object::Object;
 use tokio::runtime;
 use tracing_test::traced_test;
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test()]
 pub async fn test_gossip() {
     let authority_count = 4;
     let digest1 = TransactionDigest::random();
@@ -44,13 +44,13 @@ pub async fn test_gossip() {
 
         //let active_handle = tokio::task::spawn(async move {
         let active_state = ActiveAuthority::new(inner_state, inner_clients).unwrap();
-        let active_handle = active_state.spawn_gossip_cancellable().await;
+        let tx_cancellation = active_state.spawn_all_active_processes().await;
         //});
-        active_authorities.push(active_handle);
+        active_authorities.push(tx_cancellation);
     }
 
     //tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    //tokio::time::sleep(Duration::from_secs(1)).await;
 
     for state in states {
         let result1 = state._database.transaction_exists(&digest1);
@@ -65,7 +65,7 @@ pub async fn test_gossip() {
         assert!(result3.unwrap());
     }
     for active in active_authorities {
-        active.abort();
+        _ = active.send(());
     }
 }
 
