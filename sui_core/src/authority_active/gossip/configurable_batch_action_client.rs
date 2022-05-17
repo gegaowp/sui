@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use sui_types::base_types::{ObjectID, TransactionDigest};
 use sui_types::batch::{AuthorityBatch, SignedBatch, TxSequenceNumber, UpdateItem};
-use sui_types::committee::Committee;
-use sui_types::crypto::{get_key_pair, KeyPair, PublicKeyBytes};
+use sui_types::committee::{Committee, EpochId};
+use sui_types::crypto::{get_key_pair, AuthoritySignature, KeyPair, PublicKeyBytes};
 use sui_types::error::SuiError;
 use sui_types::messages::{
     AccountInfoRequest, AccountInfoResponse, BatchInfoRequest, BatchInfoResponseItem,
-    ConfirmationTransaction, ConsensusTransaction, ObjectInfoRequest, ObjectInfoResponse,
-    Transaction, TransactionInfoRequest, TransactionInfoResponse,
+    CertifiedTransaction, ConfirmationTransaction, ConsensusTransaction, ObjectInfoRequest,
+    ObjectInfoResponse, Transaction, TransactionInfoRequest, TransactionInfoResponse,
 };
 use tokio::time::{Duration, Instant};
 
@@ -32,7 +32,6 @@ pub enum BatchAction {
 pub struct ConfigurableBatchActionClient {
     state: Arc<AuthorityState>,
     pub action_sequence: Vec<BatchAction>,
-    test_time: Instant,
 }
 
 impl ConfigurableBatchActionClient {
@@ -61,7 +60,6 @@ impl ConfigurableBatchActionClient {
         ConfigurableBatchActionClient {
             state: Arc::new(state),
             action_sequence: Vec::new(),
-            test_time: Instant::now(),
         }
     }
 
@@ -90,8 +88,7 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
         transaction: Transaction,
     ) -> Result<TransactionInfoResponse, SuiError> {
         let state = self.state.clone();
-        let result = state.handle_transaction(transaction).await;
-        result
+        state.handle_transaction(transaction).await
     }
 
     async fn handle_confirmation_transaction(

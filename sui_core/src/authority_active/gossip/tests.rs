@@ -11,11 +11,12 @@ use std::time::Duration;
 use sui_network::network::NetworkClient;
 use sui_types::base_types::TransactionDigest;
 use sui_types::object::Object;
-use tokio::runtime;
+use tokio::{runtime, select};
 use tracing_test::traced_test;
 
-#[tokio::test()]
+#[tokio::test]
 pub async fn test_gossip() {
+    println!("time is {:?}\n", tokio::time::Instant::now());
     let authority_count = 4;
     let digest1 = TransactionDigest::random();
     let digest2 = TransactionDigest::random();
@@ -42,15 +43,18 @@ pub async fn test_gossip() {
         let inner_state = state.clone();
         let inner_clients = clients.clone();
 
-        //let active_handle = tokio::task::spawn(async move {
-        let active_state = ActiveAuthority::new(inner_state, inner_clients).unwrap();
-        let tx_cancellation = active_state.spawn_all_active_processes().await;
-        //});
-        active_authorities.push(tx_cancellation);
+        let handle = tokio::task::spawn(async move {
+            let active_state = ActiveAuthority::new(inner_state, inner_clients).unwrap();
+            active_state.spawn_all_active_processes().await;
+        });
+        active_authorities.push(handle);
     }
-
-    //tokio::task::yield_now().await;
-    //tokio::time::sleep(Duration::from_secs(1)).await;
+    println!(
+        "after launching active, time is {:?}\n",
+        tokio::time::Instant::now()
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    println!("now time is {:?}\n", tokio::time::Instant::now());
 
     for state in states {
         let result1 = state._database.transaction_exists(&digest1);
@@ -64,9 +68,25 @@ pub async fn test_gossip() {
         assert!(result3.is_ok());
         assert!(result3.unwrap());
     }
-    for active in active_authorities {
-        _ = active.send(());
+
+    for handle in active_authorities {
+        handle.abort();
     }
+}
+
+#[tokio::test]
+pub async fn advance_time() {
+    println!("time is {:?}\n", tokio::time::Instant::now());
+    let duration = Duration::from_secs(5);
+    let mut timeout = Box::pin(tokio::time::sleep(duration));
+    loop {
+        select! {
+             _ = &mut timeout => {
+                break;
+             }
+        }
+    }
+    println!("now time is {:?}\n", tokio::time::Instant::now());
 }
 
 #[tokio::test]

@@ -37,6 +37,7 @@ use std::{
 use sui_types::{base_types::AuthorityName, error::SuiResult};
 use tokio::sync::oneshot::{channel, Sender};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use crate::{
     authority::AuthorityState, authority_aggregator::AuthorityAggregator,
@@ -176,12 +177,11 @@ where
     A: AuthorityAPI + Send + Sync + 'static + Clone,
 {
     /// Spawn all active tasks.
-    pub async fn spawn_all_active_processes(self) -> Sender<()> {
+    pub async fn spawn_all_active_processes(self) -> JoinHandle<()> {
         // Spawn a task to take care of gossip
-        let (tx_cancellation, tr_cancellation) = channel();
-        let _gossip_join = tokio::task::spawn(async move {
-            gossip_process(&self, 4, tr_cancellation).await;
+        let gossip_join = tokio::task::spawn(async move {
+            gossip_process(&self, 4).await;
         });
-        tx_cancellation
+        gossip_join
     }
 }
