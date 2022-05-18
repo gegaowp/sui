@@ -1,22 +1,23 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
+import { createSlice } from '@reduxjs/toolkit';
 import Browser from 'webextension-polyfill';
 
 import { generateMnemonic } from '_shared/cryptography/mnemonics';
+import { createAppAsyncThunk } from '_store/redux-helpers';
 
 import type { PayloadAction } from '@reduxjs/toolkit';
 
-export const loadAccountFromStorage = createAsyncThunk(
+export const loadAccountFromStorage = createAppAsyncThunk(
     'account/loadAccount',
-    async (): Promise<string> => {
+    async (): Promise<string | null> => {
         const { mnemonic } = await Browser.storage.local.get('mnemonic');
-        return mnemonic;
+        return mnemonic || null;
     }
 );
 
-export const createMnemonic = createAsyncThunk(
+export const createMnemonic = createAppAsyncThunk(
     'account/createMnemonic',
     async (existingMnemonic?: string): Promise<string> => {
         const mnemonic = existingMnemonic || generateMnemonic();

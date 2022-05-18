@@ -18,7 +18,7 @@ const App = () => {
     const dispatch = useAppDispatch();
     useEffect(() => {
         dispatch(loadAccountFromStorage());
-    });
+    }, []);
     return (
         <Routes>
             <Route path="/" element={<HomePage />} />
