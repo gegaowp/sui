@@ -13,6 +13,7 @@ use tracing::debug;
 use sui_core::gateway_state::{GatewayClient, GatewayState, GatewayTxSeqNumber};
 use sui_core::gateway_types::GetObjectInfoResponse;
 use sui_core::sui_json::SuiJsonValue;
+use sui_types::base_types::ObjectInfo;
 use sui_types::sui_serde::Base64;
 use sui_types::{
     base_types::{ObjectID, SuiAddress, TransactionDigest},
@@ -25,7 +26,6 @@ use crate::rpc_gateway::responses::SuiTypeTag;
 use crate::{
     api::{RpcGatewayServer, TransactionBytes},
     config::{GatewayConfig, PersistedConfig},
-    rpc_gateway::responses::ObjectResponse,
 };
 
 pub mod responses;
@@ -120,10 +120,17 @@ impl RpcGatewayServer for RpcGatewayImpl {
         Ok(TransactionBytes::from_data(data)?)
     }
 
-    async fn get_owned_objects(&self, owner: SuiAddress) -> RpcResult<ObjectResponse> {
-        debug!("get_objects : {}", owner);
-        let objects = self.gateway.get_owned_objects(owner).await?;
-        Ok(ObjectResponse { objects })
+    async fn get_objects_owned_by_address(
+        &self,
+        address: SuiAddress,
+    ) -> RpcResult<Vec<ObjectInfo>> {
+        debug!("get_objects_own_by_address : {}", address);
+        Ok(self.gateway.get_objects_owned_by_address(address).await?)
+    }
+
+    async fn get_objects_owned_by_object(&self, object_id: ObjectID) -> RpcResult<Vec<ObjectInfo>> {
+        debug!("get_objects_own_by_object : {}", object_id);
+        Ok(self.gateway.get_objects_owned_by_object(object_id).await?)
     }
 
     async fn get_object_info(&self, object_id: ObjectID) -> RpcResult<GetObjectInfoResponse> {

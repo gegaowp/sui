@@ -17,10 +17,10 @@ use sui::config::SUI_WALLET_CONFIG;
 use sui::wallet_commands::{WalletCommandResult, WalletCommands, WalletContext};
 use sui::wallet_commands::{EXAMPLE_NFT_DESCRIPTION, EXAMPLE_NFT_NAME, EXAMPLE_NFT_URL};
 use sui_core::gateway_types::{
-    GetObjectInfoResponse, SuiObjectRef, TransactionEffectsResponse, TransactionResponse,
+    GetObjectInfoResponse, TransactionEffectsResponse, TransactionResponse,
 };
 use sui_core::sui_json::SuiJsonValue;
-use sui_types::base_types::{ObjectID, SuiAddress};
+use sui_types::base_types::{ObjectID, ObjectInfo, SuiAddress};
 use sui_types::SUI_FRAMEWORK_ADDRESS;
 use test_utils::network::start_test_network;
 
@@ -90,7 +90,10 @@ async fn create_response_sample(
     context.gateway.sync_account_state(address).await?;
 
     // Create coin response
-    let coins = context.gateway.get_owned_objects(address).await?;
+    let coins = context
+        .gateway
+        .get_objects_owned_by_address(address)
+        .await?;
     let coin = context
         .gateway
         .get_object_info(coins.first().unwrap().object_id)
@@ -100,7 +103,7 @@ async fn create_response_sample(
     let move_package = create_package_object_response(&mut context).await?;
     let hero = create_hero_response(&mut context, &coins).await?;
     let transfer = create_transfer_response(&mut context, address, &coins).await?;
-    let coin_split = create_coin_split_response(&mut context, coins).await?;
+    let coin_split = create_coin_split_response(&mut context, &coins).await?;
 
     let objects = ObjectResponseSample {
         example_nft,
@@ -143,7 +146,7 @@ async fn create_package_object_response(
 async fn create_transfer_response(
     context: &mut WalletContext,
     address: SuiAddress,
-    coins: &[SuiObjectRef],
+    coins: &[ObjectInfo],
 ) -> Result<TransactionResponse, anyhow::Error> {
     let response = WalletCommands::Transfer {
         to: address,
@@ -167,7 +170,7 @@ async fn create_transfer_response(
 
 async fn create_hero_response(
     context: &mut WalletContext,
-    coins: &[SuiObjectRef],
+    coins: &[ObjectInfo],
 ) -> Result<GetObjectInfoResponse, anyhow::Error> {
     // Create hero response
     let result = WalletCommands::Publish {
@@ -215,7 +218,7 @@ async fn create_hero_response(
 
 async fn create_coin_split_response(
     context: &mut WalletContext,
-    coins: Vec<SuiObjectRef>,
+    coins: &[ObjectInfo],
 ) -> Result<TransactionResponse, anyhow::Error> {
     // create coin_split response
     let result = WalletCommands::SplitCoin {
