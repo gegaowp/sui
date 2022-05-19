@@ -53,7 +53,7 @@ pub async fn test_gossip() {
         "after launching active, time is {:?}\n",
         tokio::time::Instant::now()
     );
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
     println!("now time is {:?}\n", tokio::time::Instant::now());
 
     for state in states {
