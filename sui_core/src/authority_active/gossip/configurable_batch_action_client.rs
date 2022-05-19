@@ -157,6 +157,14 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
         let name = self.state.name;
         let mut items: Vec<Result<BatchInfoResponseItem, SuiError>> = Vec::new();
 
+        debug_assert!(!actions.is_empty());
+
+        // We send the first batch
+        items.push({
+            let item = SignedBatch::new(last_batch.clone(), &*secret, name);
+            Ok(BatchInfoResponseItem(UpdateItem::Batch(item)))
+        });
+
         let _ = actions.into_iter().for_each(|action| {
             match action {
                 BatchAction::EmitUpdateItems(test_batch) => {
@@ -174,17 +182,25 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
                     }
                     let new_batch = AuthorityBatch::make_next(&last_batch, &transactions).unwrap();
                     last_batch = new_batch;
+
+                    // We send all the items of the next batch
+                    for temp_item in temp_items {
+                        items.push(temp_item)
+                    }
+                    // Then the next batch itself
                     items.push({
                         let item = SignedBatch::new(last_batch.clone(), &*secret, name);
                         Ok(BatchInfoResponseItem(UpdateItem::Batch(item)))
                     });
-                    for temp_item in temp_items {
-                        items.push(temp_item)
-                    }
                 }
                 BatchAction::DoNothing(_d) => {}
             };
         });
+
+        println!("FULL SEQUENCE!");
+        for i in &items {
+            println!("Item: {:?}", i);
+        }
 
         Ok(Box::pin(tokio_stream::iter(items)))
     }
