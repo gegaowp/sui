@@ -6,7 +6,7 @@ pub mod reconstruction;
 
 #[cfg(test)]
 #[path = "./tests/checkpoint_tests.rs"]
-mod checkpoint_tests;
+pub(crate) mod checkpoint_tests;
 
 use std::{collections::HashSet, path::Path, sync::Arc};
 
