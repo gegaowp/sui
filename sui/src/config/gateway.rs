@@ -3,6 +3,7 @@
 
 use crate::{config::Config, rpc_gateway_client::RpcGatewayClient};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{
     collections::BTreeMap,
     fmt::{Display, Formatter, Write},
@@ -64,9 +65,9 @@ impl GatewayType {
                 let path = config.db_folder_path.clone();
                 let committee = config.make_committee();
                 let authority_clients = config.make_authority_clients();
-                Box::new(GatewayState::new(path, committee, authority_clients)?)
+                Arc::new(GatewayState::new(path, committee, authority_clients)?)
             }
-            GatewayType::RPC(url) => Box::new(RpcGatewayClient::new(url.clone())?),
+            GatewayType::RPC(url) => Arc::new(RpcGatewayClient::new(url.clone())?),
         })
     }
 }

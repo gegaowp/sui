@@ -12,7 +12,7 @@ use pretty_assertions::assert_str_eq;
 use serde::Serialize;
 use serde_json::json;
 
-use sui::api::RpcGatewayOpenRpc;
+use sui::api::RpcGatewayApiOpenRpc;
 use sui::config::SUI_WALLET_CONFIG;
 use sui::wallet_commands::{WalletCommandResult, WalletCommands, WalletContext};
 use sui::wallet_commands::{EXAMPLE_NFT_DESCRIPTION, EXAMPLE_NFT_NAME, EXAMPLE_NFT_URL};
@@ -48,7 +48,7 @@ const TRANSACTION_SAMPLE_FILE_PATH: &str = "sui/open_rpc/samples/transactions.js
 #[tokio::main]
 async fn main() {
     let options = Options::parse();
-    let open_rpc = RpcGatewayOpenRpc::open_rpc();
+    let open_rpc = RpcGatewayApiOpenRpc::open_rpc();
     match options.action {
         Action::Print => {
             let content = serde_json::to_string_pretty(&open_rpc).unwrap();

@@ -1,19 +1,24 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use jsonrpsee::{
+    http_client::{HttpClient, HttpClientBuilder},
+    http_server::{HttpServerBuilder, HttpServerHandle},
+};
+use jsonrpsee_core::server::rpc_module::RpcModule;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
 };
+use sui::api::RpcReadApiClient;
+use sui::api::RpcReadApiServer;
+use sui::api::RpcTransactionBuilderClient;
+use sui::api::RpcTransactionBuilderServer;
 
-use jsonrpsee::{
-    http_client::{HttpClient, HttpClientBuilder},
-    http_server::{HttpServerBuilder, HttpServerHandle},
-};
-
+use sui::rpc_gateway::{create_client, GatewayReadApiImpl, TransactionBuilderImpl};
 use sui::{
-    api::{RpcGatewayClient, RpcGatewayServer, TransactionBytes},
+    api::{RpcGatewayApiClient, RpcGatewayApiServer, TransactionBytes},
     config::{PersistedConfig, WalletConfig, SUI_GATEWAY_CONFIG, SUI_WALLET_CONFIG},
     keystore::{Keystore, SuiKeystore},
     rpc_gateway::{responses::ObjectResponse, RpcGatewayImpl},
@@ -287,6 +292,12 @@ async fn start_rpc_gateway(
 ) -> Result<(SocketAddr, HttpServerHandle), anyhow::Error> {
     let server = HttpServerBuilder::default().build("127.0.0.1:0").await?;
     let addr = server.local_addr()?;
-    let handle = server.start(RpcGatewayImpl::new(config_path)?.into_rpc())?;
+    let client = create_client(config_path)?;
+    let mut module = RpcModule::new(());
+    module.merge(RpcGatewayImpl::new(client.clone()).into_rpc())?;
+    module.merge(GatewayReadApiImpl::new(client.clone()).into_rpc())?;
+    module.merge(TransactionBuilderImpl::new(client.clone()).into_rpc())?;
+
+    let handle = server.start(module)?;
     Ok((addr, handle))
 }

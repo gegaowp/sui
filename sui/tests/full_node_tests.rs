@@ -1,11 +1,13 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use sui::sui_full_node::create_full_node_client;
 use sui::{
     config::SUI_NETWORK_CONFIG,
     sui_full_node::SuiFullNode,
     wallet_commands::{WalletCommandResult, WalletCommands, WalletContext},
 };
+use sui_core::full_node::FullNode;
 
 use sui_types::base_types::{ObjectID, SuiAddress, TransactionDigest};
 use test_utils::network::setup_network_and_wallet_in_working_dir;
@@ -46,11 +48,12 @@ async fn test_full_node_follows_txes() -> Result<(), anyhow::Error> {
 
     let (_network, mut context, _) = setup_network_and_wallet_in_working_dir(&working_dir).await?;
 
-    let node = SuiFullNode::start_with_genesis(
+    let client = create_full_node_client(
         &working_dir.path().join(SUI_NETWORK_CONFIG),
         working_dir.path(),
     )
     .await?;
+    let node = SuiFullNode::new(client);
 
     let (transfered_object, _, receiver, _) = transfer_coin(&node, &mut context).await?;
 
@@ -69,11 +72,12 @@ async fn test_full_node_indexes() -> Result<(), anyhow::Error> {
 
     let (_network, mut context, _) = setup_network_and_wallet_in_working_dir(&working_dir).await?;
 
-    let node = SuiFullNode::start_with_genesis(
+    let client = create_full_node_client(
         &working_dir.path().join(SUI_NETWORK_CONFIG),
         working_dir.path(),
     )
     .await?;
+    let node = SuiFullNode::new(client);
 
     let (transfered_object, sender, receiver, digest) = transfer_coin(&node, &mut context).await?;
 

@@ -1,138 +1,67 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
-use sui_storage::IndexStore;
-use sui_types::sui_serde::Base64;
-
-use crate::{
-    api::{RpcGatewayServer, TransactionBytes},
-    rpc_gateway::responses::{ObjectResponse, SuiTypeTag},
-};
+use crate::api::RpcFullNodeApiServer;
+use crate::api::RpcReadApiServer;
+use crate::rpc_gateway::responses::ObjectResponse;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
+use std::path::Path;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use sui_config::{NetworkConfig, PersistedConfig};
 use sui_core::{
     authority::ReplicaStore,
     full_node::FullNodeState,
-    gateway_types::{
-        GetObjectInfoResponse, SuiObjectRef, TransactionEffectsResponse, TransactionResponse,
-    },
-    sui_json::SuiJsonValue,
+    gateway_types::{GetObjectInfoResponse, SuiObjectRef, TransactionEffectsResponse},
 };
 use sui_core::{
     authority_client::NetworkAuthorityClient, full_node::FullNode,
     gateway_state::GatewayTxSeqNumber,
 };
+use sui_storage::IndexStore;
 use sui_types::{
     base_types::{ObjectID, SuiAddress, TransactionDigest},
     error::SuiError,
 };
 use tracing::info;
 
+pub type FullNodeClient = Arc<FullNode<NetworkAuthorityClient>>;
+
 pub struct SuiFullNode {
-    pub client: FullNode<NetworkAuthorityClient>,
+    pub client: FullNodeClient,
+}
+
+pub struct FullNodeReadApi {
+    client: FullNodeClient,
+}
+
+pub async fn create_full_node_client(
+    config_path: &Path,
+    db_path: &Path,
+) -> Result<FullNodeClient, anyhow::Error> {
+    let network_config = PersistedConfig::read(config_path)?;
+    // Start a full node
+    let full_node = make_full_node(db_path, &network_config).await?;
+    full_node.spawn_tasks().await;
+    info!("Started full node ");
+    Ok(Arc::new(full_node))
 }
 
 impl SuiFullNode {
-    pub async fn start_with_genesis(
-        network_config_path: &Path,
-        db_path: &Path,
-    ) -> anyhow::Result<Self> {
-        // Network config is all we need for now
-        let network_config: NetworkConfig = PersistedConfig::read(network_config_path)?;
+    pub fn new(client: FullNodeClient) -> Self {
+        Self { client }
+    }
+}
 
-        // Start a full node
-        let full_node = make_full_node(db_path.to_path_buf(), &network_config).await?;
-        full_node.spawn_tasks().await;
-        info!("Started full node ");
-
-        Ok(Self { client: full_node })
+impl FullNodeReadApi {
+    pub fn new(client: FullNodeClient) -> Self {
+        Self { client }
     }
 }
 
 #[async_trait]
-impl RpcGatewayServer for SuiFullNode {
-    async fn transfer_coin(
-        &self,
-        _signer: SuiAddress,
-        _object_id: ObjectID,
-        _gas: Option<ObjectID>,
-        _gas_budget: u64,
-        _recipient: SuiAddress,
-    ) -> RpcResult<TransactionBytes> {
-        Err(anyhow!("Sui Node only supports read-only methods").into())
-    }
-
-    async fn publish(
-        &self,
-        _sender: SuiAddress,
-        _compiled_modules: Vec<Base64>,
-        _gas: Option<ObjectID>,
-        _gas_budget: u64,
-    ) -> RpcResult<TransactionBytes> {
-        Err(anyhow!("Sui Node only supports read-only methods").into())
-    }
-
-    async fn split_coin(
-        &self,
-        _signer: SuiAddress,
-        _coin_object_id: ObjectID,
-        _split_amounts: Vec<u64>,
-        _gas: Option<ObjectID>,
-        _gas_budget: u64,
-    ) -> RpcResult<TransactionBytes> {
-        Err(anyhow!("Sui Node only supports read-only methods").into())
-    }
-
-    async fn merge_coin(
-        &self,
-        _signer: SuiAddress,
-        _primary_coin: ObjectID,
-        _coin_to_merge: ObjectID,
-        _gas: Option<ObjectID>,
-        _gas_budget: u64,
-    ) -> RpcResult<TransactionBytes> {
-        Err(anyhow!("Sui Node only supports read-only methods").into())
-    }
-
-    async fn execute_transaction(
-        &self,
-        _tx_bytes: Base64,
-        _signature: Base64,
-        _pub_key: Base64,
-    ) -> RpcResult<TransactionResponse> {
-        Err(anyhow!("Sui Node only supports read-only methods").into())
-    }
-
-    async fn move_call(
-        &self,
-        _signer: SuiAddress,
-        _package_object_id: ObjectID,
-        _module: String,
-        _function: String,
-        _type_arguments: Vec<SuiTypeTag>,
-        _rpc_arguments: Vec<SuiJsonValue>,
-        _gas: Option<ObjectID>,
-        _gas_budget: u64,
-    ) -> RpcResult<TransactionBytes> {
-        Err(anyhow!("Sui Node only supports read-only methods").into())
-    }
-
-    async fn sync_account_state(&self, _address: SuiAddress) -> RpcResult<()> {
-        todo!()
-    }
-
-    //
-    // Read APIs
-    //
-
+impl RpcReadApiServer for FullNodeReadApi {
     async fn get_owned_objects(&self, owner: SuiAddress) -> RpcResult<ObjectResponse> {
         let resp = ObjectResponse {
             objects: self
@@ -154,7 +83,6 @@ impl RpcGatewayServer for SuiFullNode {
             .try_into()
             .map_err(|e| anyhow!("{}", e))?)
     }
-
     async fn get_total_transaction_number(&self) -> RpcResult<u64> {
         Ok(self.client.state.get_total_transaction_number()?)
     }
@@ -180,7 +108,10 @@ impl RpcGatewayServer for SuiFullNode {
     ) -> RpcResult<TransactionEffectsResponse> {
         Ok(self.client.state.get_transaction(digest).await?)
     }
+}
 
+#[async_trait]
+impl RpcFullNodeApiServer for SuiFullNode {
     async fn get_transactions_by_input_object(
         &self,
         object: ObjectID,
@@ -219,10 +150,10 @@ impl RpcGatewayServer for SuiFullNode {
 }
 
 pub async fn make_full_node(
-    db_store_path: PathBuf,
+    db_store_path: &Path,
     net_config: &NetworkConfig,
 ) -> Result<FullNode<NetworkAuthorityClient>, SuiError> {
-    let store = Arc::new(ReplicaStore::open(&db_store_path, None));
+    let store = Arc::new(ReplicaStore::open(db_store_path, None));
     let index_path = db_store_path.join("indexes");
     let indexes = Arc::new(IndexStore::open(index_path, None));
 

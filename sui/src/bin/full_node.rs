@@ -1,22 +1,25 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::Parser;
-use jsonrpsee::{
-    http_server::{AccessControlBuilder, HttpServerBuilder},
-    RpcModule,
-};
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
 };
+
+use clap::Parser;
+use jsonrpsee::{
+    http_server::{AccessControlBuilder, HttpServerBuilder},
+    RpcModule,
+};
+use tracing::info;
+
+use sui::sui_full_node::{create_full_node_client, FullNodeReadApi};
 use sui::{
-    api::{RpcGatewayOpenRpc, RpcGatewayServer},
+    api::{RpcFullNodeApiServer, RpcGatewayApiOpenRpc, RpcReadApiServer},
     config::{sui_config_dir, FULL_NODE_DB_PATH},
     sui_full_node::SuiFullNode,
 };
-use tracing::info;
 
 const DEFAULT_NODE_SERVER_PORT: &str = "5002";
 const DEFAULT_NODE_SERVER_ADDR_IPV4: &str = "127.0.0.1";
@@ -76,14 +79,12 @@ async fn main() -> anyhow::Result<()> {
         .build(SocketAddr::new(IpAddr::V4(options.host), options.port))
         .await?;
 
+    let client = create_full_node_client(&config_path, &db_path).await?;
     let mut module = RpcModule::new(());
-    let open_rpc = RpcGatewayOpenRpc::open_rpc();
+    let open_rpc = RpcGatewayApiOpenRpc::open_rpc();
     module.register_method("rpc.discover", move |_, _| Ok(open_rpc.clone()))?;
-    module.merge(
-        SuiFullNode::start_with_genesis(&config_path, &db_path)
-            .await?
-            .into_rpc(),
-    )?;
+    module.merge(SuiFullNode::new(client.clone()).into_rpc())?;
+    module.merge(FullNodeReadApi::new(client).into_rpc())?;
 
     info!(
         "Available JSON-RPC methods : {:?}",

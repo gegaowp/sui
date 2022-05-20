@@ -1,6 +1,13 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    time::Instant,
+};
+
 use clap::Parser;
 use jsonrpsee::{
     http_server::{AccessControlBuilder, HttpServerBuilder},
@@ -10,18 +17,16 @@ use jsonrpsee_core::middleware::Middleware;
 use prometheus_exporter::prometheus::{
     register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec,
 };
-use std::{
-    env,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
-    time::Instant,
-};
+use tracing::info;
+
+use sui::api::RpcReadApiServer;
+use sui::api::RpcTransactionBuilderServer;
+use sui::rpc_gateway::{create_client, GatewayReadApiImpl, TransactionBuilderImpl};
 use sui::{
-    api::{RpcGatewayOpenRpc, RpcGatewayServer},
+    api::{RpcGatewayApiOpenRpc, RpcGatewayApiServer},
     config::sui_config_dir,
     rpc_gateway::RpcGatewayImpl,
 };
-use tracing::info;
 
 const DEFAULT_RPC_SERVER_PORT: &str = "5001";
 const DEFAULT_RPC_SERVER_ADDR_IPV4: &str = "127.0.0.1";
@@ -82,10 +87,14 @@ async fn main() -> anyhow::Result<()> {
         .build(SocketAddr::new(IpAddr::V4(options.host), options.port))
         .await?;
 
+    let client = create_client(&config_path)?;
+
     let mut module = RpcModule::new(());
-    let open_rpc = RpcGatewayOpenRpc::open_rpc();
+    let open_rpc = RpcGatewayApiOpenRpc::open_rpc();
     module.register_method("rpc.discover", move |_, _| Ok(open_rpc.clone()))?;
-    module.merge(RpcGatewayImpl::new(&config_path)?.into_rpc())?;
+    module.merge(RpcGatewayImpl::new(client.clone()).into_rpc())?;
+    module.merge(GatewayReadApiImpl::new(client.clone()).into_rpc())?;
+    module.merge(TransactionBuilderImpl::new(client).into_rpc())?;
 
     info!(
         "Available JSON-RPC methods : {:?}",
