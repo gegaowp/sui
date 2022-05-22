@@ -20,7 +20,8 @@ use sui_core::{
     sui_json::SuiJsonValue,
 };
 use sui_core::{authority_client::NetworkAuthorityClient, gateway_state::GatewayTxSeqNumber};
-use sui_types::base_types::{ObjectID, SuiAddress, TransactionDigest};
+use sui_types::base_types::{ObjectID, ObjectInfo, SuiAddress, TransactionDigest};
+use sui_types::object::Owner;
 use tracing::info;
 
 pub struct SuiFullNode {
@@ -194,14 +195,16 @@ impl RpcGatewayServer for SuiFullNode {
         address: SuiAddress,
     ) -> RpcResult<Vec<ObjectInfo>> {
         Ok(self
-            .client
-            .get_owner_objects(Owner::AddressOwner(address))?)
+            .state
+            .get_owner_objects(Owner::AddressOwner(address))
+            .map_err(|e| anyhow!("{e}"))?)
     }
 
     async fn get_objects_owned_by_object(&self, object_id: ObjectID) -> RpcResult<Vec<ObjectInfo>> {
         Ok(self
-            .client
-            .get_owner_objects(Owner::ObjectOwner(object_id.into()))?)
+            .state
+            .get_owner_objects(Owner::ObjectOwner(object_id.into()))
+            .map_err(|e| anyhow!("{e}"))?)
     }
 
     async fn get_object_info(&self, object_id: ObjectID) -> RpcResult<GetObjectInfoResponse> {
