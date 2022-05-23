@@ -66,10 +66,14 @@ async function getRecentTransactions(txNum: number): Promise<TxnData[]> {
                     const singleTransaction = getSingleTransactionKind(
                         res.data
                     );
+
                     if (!singleTransaction) {
-                        throw new Error(
-                            `Transaction kind not supported yet ${res.data.kind}`
+                        // TODO: https://github.com/MystenLabs/sui/issues/2002
+                        console.log(
+                            `Transaction kind not supported yet ${res.data.kind}`,
+                            txEff
                         );
+                        return null;
                     }
                     const txKind = getTransactionKind(res.data);
                     const recipient = getTransferTransaction(
@@ -90,6 +94,10 @@ async function getRecentTransactions(txNum: number): Promise<TxnData[]> {
                             : {}),
                     };
                 });
+            })
+            .catch((e) => {
+                console.log('Error when getTransactionWithEffectsBatch', e);
+                throw e;
             });
 
         // Remove failed transactions and sort by sequence number
