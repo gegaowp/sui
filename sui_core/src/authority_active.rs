@@ -8,7 +8,7 @@
     (1) Share transactions received with other authorities, to complete their execution
         in case clients fail before sharing a transaction with sufficient authorities.
     (2) Share certificates with other authorities in case clients fail before a
-        certificate has its executon finalized.
+        certificate has its execution finalized.
     (3) Gossip executed certificates digests with other authorities through following
         each other and using push / pull to execute certificates.
     (4) Perform the active operations necessary to progress the periodic checkpointing
@@ -29,6 +29,7 @@
 
 */
 
+use std::collections::HashSet;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -47,6 +48,7 @@ use tokio::time::Instant;
 
 pub mod gossip;
 use gossip::gossip_process;
+use sui_types::error::SuiError;
 
 // TODO: Make these into a proper config
 const MAX_RETRIES_RECORDED: u32 = 10;
@@ -86,7 +88,7 @@ impl AuthorityHealth {
         self.no_contact_before = Instant::now();
     }
 
-    pub fn can_contact_now(&self) -> bool {
+    pub fn can_initiate_contact_now(&self) -> bool {
         let now = Instant::now();
         let result = self.no_contact_before <= now;
         return result;
@@ -100,8 +102,6 @@ pub struct ActiveAuthority<A> {
     pub net: Arc<AuthorityAggregator<A>>,
     // Network health
     pub health: Arc<Mutex<HashMap<AuthorityName, AuthorityHealth>>>,
-    // Cancellation Sender
-    pub tx_cancellation: Option<Sender<()>>,
 }
 
 impl<A> ActiveAuthority<A> {
@@ -121,7 +121,6 @@ impl<A> ActiveAuthority<A> {
             )),
             state: authority,
             net: Arc::new(AuthorityAggregator::new(committee, authority_clients)),
-            tx_cancellation: None,
         })
     }
 
@@ -167,7 +166,7 @@ impl<A> ActiveAuthority<A> {
     pub async fn can_contact(&self, name: AuthorityName) -> bool {
         let mut lock = self.health.lock().await;
         let entry = lock.entry(name).or_default();
-        let result = entry.can_contact_now();
+        let result = entry.can_initiate_contact_now();
         result
     }
 }

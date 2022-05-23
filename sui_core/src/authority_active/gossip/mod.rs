@@ -6,8 +6,11 @@ use crate::{
     authority_client::AuthorityAPI, safe_client::SafeClient,
 };
 use futures::{stream::FuturesUnordered, StreamExt};
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::{collections::HashSet, sync::Arc, time::Duration};
+use sui_types::committee::Committee;
+use sui_types::messages::TransactionInfoResponse;
 use sui_types::{
     base_types::AuthorityName,
     batch::{TxSequenceNumber, UpdateItem},
@@ -23,6 +26,7 @@ use tracing::{debug, error, info};
 mod configurable_batch_action_client;
 // #[cfg(test)]
 // mod test_batch_action;
+mod peer_gossip;
 #[cfg(test)]
 mod tests;
 
@@ -67,25 +71,33 @@ where
     loop {
         let mut k = 0;
         while gossip_tasks.len() < target_num_tasks {
-            let name = active_authority.state.committee.sample();
-            if peer_names.contains(name) {
-                continue;
-            }
-            if *name == active_authority.state.name {
-                continue;
-            }
-            if !active_authority.can_contact(*name).await {
-                // Are we likely to never terminate because of this condition?
-                // - We check we have nodes left by stake
-                // - We check that we have at least 2/3 of nodes that can be contacted.
-                continue;
-            }
+            // Find out what is the earliest time that we are allowed to reconnect
+            // to at least 2f+1 nodes.
+            let next_connect = active_authority
+                .minimum_wait_for_majority_honest_available()
+                .await;
+            debug!(
+                "Waiting for {:?}",
+                next_connect - tokio::time::Instant::now()
+            );
+            tokio::time::sleep_until(next_connect).await;
 
-            peer_names.insert(*name);
+            let name_result = select_gossip_peer(
+                active_authority.state.name,
+                peer_names.clone(),
+                active_authority,
+            )
+            .await;
+            if name_result.is_err() {
+                continue;
+            }
+            let name = name_result.unwrap();
+
+            peer_names.insert(name);
             gossip_tasks.push(async move {
-                let peer_gossip = PeerGossip::new(*name, active_authority);
+                let peer_gossip = PeerGossip::new(name, active_authority);
                 // Add more duration if we make more than 1 to ensure overlap
-                debug!("Starting gossip from peer {:?}", *name);
+                debug!("Starting gossip from peer {:?}", name);
                 peer_gossip
                     .spawn(Duration::from_secs(REFRESH_FOLLOWER_PERIOD_SECS + k * 15))
                     .await
@@ -102,22 +114,11 @@ where
             if total_stake_used >= committee.quorum_threshold() {
                 break;
             }
-
-            // Find out what is the earliest time that we are allowed to reconnect
-            // to at least 2f+1 nodes.
-            let next_connect = active_authority
-                .minimum_wait_for_majority_honest_available()
-                .await;
-            debug!(
-                "Waiting for {:?}",
-                next_connect - tokio::time::Instant::now()
-            );
-            tokio::time::sleep_until(next_connect).await;
         }
 
         // If we have no peers no need to wait for one
         if gossip_tasks.is_empty() {
-            continue; // TODO what to do here? This should not happen.
+            continue;
         }
 
         // Let the peer gossip task finish
@@ -130,6 +131,36 @@ where
             debug!("End gossip from peer {:?}", finished_name);
         }
         peer_names.remove(&finished_name);
+    }
+}
+
+pub async fn select_gossip_peer<A>(
+    my_name: AuthorityName,
+    peer_names: HashSet<AuthorityName>,
+    active_authority: &ActiveAuthority<A>,
+) -> Result<AuthorityName, SuiError>
+where
+    A: AuthorityAPI + Send + Sync + 'static + Clone,
+{
+    // Make sure we exit loop by limiting the number of tries to choose peer
+    // where n is the total number of committee members.
+    let mut tries_remaining = active_authority.state.committee.voting_rights.len();
+    loop {
+        let name = active_authority.state.committee.sample();
+        if peer_names.contains(name)
+            || *name == my_name
+            || !active_authority.can_contact(*name).await
+        {
+            tries_remaining -= 1;
+            if tries_remaining == 0 {
+                return Err(SuiError::GenericAuthorityError {
+                    error: "Could not connect to any peer".to_string(),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+        return Ok(*name);
     }
 }
 
@@ -174,10 +205,7 @@ where
         };
 
         let mut streamx = Box::pin(self.client.handle_batch_stream(req).await?);
-        print!(
-            "time in peer gossip for duration is {:?}",
-            tokio::time::Instant::now()
-        );
+
         loop {
             tokio::select! {
                 _ = &mut timeout => {
@@ -191,22 +219,12 @@ where
 
                         // Upon receiving a transaction digest, store it if it is not processed already.
                         Some(Ok(BatchInfoResponseItem(UpdateItem::Transaction((seq, digest))))) => {
-                            if !self.state._database.effects_exists(&digest)? {
+                            if !self.state._database.transaction_exists(&digest)? {
                                 // Download the certificate
+                                debug!("Digest {:?} is getting downloaded", digest);
                                 let response = self.client.handle_transaction_info_request(TransactionInfoRequest::from(digest)).await?;
-                                if let Some(certificate) = response.certified_transaction {
+                                self.process_response(response).await?;
 
-                                    // Process the certificate from one authority to ourselves
-                                    self.aggregator.sync_authority_source_to_destination(
-                                        ConfirmationTransaction { certificate },
-                                        self.peer_name,
-                                        self.state.name).await?;
-                                }
-                                else {
-                                    // The authority did not return the certificate, despite returning info
-                                    // But it should know the certificate!
-                                    return Err(SuiError::ByzantineAuthoritySuspicion { authority :  self.peer_name });
-                                }
                             }
                             self.max_seq = Some(seq + 1);
 
@@ -214,11 +232,13 @@ where
 
                         // Return any errors.
                         Some(Err( err )) => {
+                            debug!("error while reading from stream {:?}", err);
                             return Err(err);
                         },
 
                         // The stream has closed, re-request:
                         None => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
                             let req = BatchInfoRequest {
                                 start: self.max_seq,
                                 length: REQUEST_FOLLOW_NUM_DIGESTS,
@@ -230,5 +250,25 @@ where
             };
         }
         Ok(())
+    }
+
+    async fn process_response(&self, response: TransactionInfoResponse) -> Result<(), SuiError> {
+        if let Some(certificate) = response.certified_transaction {
+            // Process the certificate from one authority to ourselves
+            self.aggregator
+                .sync_authority_source_to_destination(
+                    ConfirmationTransaction { certificate },
+                    self.peer_name,
+                    self.state.name,
+                )
+                .await?;
+            Ok(())
+        } else {
+            // The authority did not return the certificate, despite returning info
+            // But it should know the certificate!
+            Err(SuiError::ByzantineAuthoritySuspicion {
+                authority: self.peer_name,
+            })
+        }
     }
 }

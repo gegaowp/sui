@@ -3,39 +3,20 @@
 
 use super::*;
 use crate::authority_active::gossip::configurable_batch_action_client::{
-    init_configurable_authorities, BatchAction, TestBatch,
+    init_configurable_authorities, BatchAction,
 };
-use crate::authority_client::NetworkAuthorityClient;
-use futures::future::join_all;
 use std::time::Duration;
-use sui_network::network::NetworkClient;
-use sui_types::base_types::TransactionDigest;
-use sui_types::object::Object;
-use tokio::{runtime, select};
 use tracing_test::traced_test;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 pub async fn test_gossip() {
-    println!("time is {:?}\n", tokio::time::Instant::now());
-    let authority_count = 4;
-    let digest1 = TransactionDigest::random();
-    let digest2 = TransactionDigest::random();
-    let digest3 = TransactionDigest::random();
-    let digests = vec![digest1, digest2, digest3];
-    let action_sequence = vec![BatchAction::EmitUpdateItems(TestBatch {
-        start: 1,
-        digests,
-    })];
-    let action_sequences = vec![
-        action_sequence.clone(),
-        action_sequence.clone(),
-        action_sequence.clone(),
-        vec![],
+    let action_sequence = vec![
+        BatchAction::EmitUpdateItem(),
+        //  BatchAction::EmitUpdateItem(),
+        //  BatchAction::EmitUpdateItem(),
     ];
-    let (aggregator, states) =
-        init_configurable_authorities(authority_count, action_sequences).await;
 
-    let clients = aggregator.authority_clients.clone();
+    let (clients, states, digests) = init_configurable_authorities(action_sequence).await;
 
     let mut active_authorities = Vec::new();
     // Start active processes.
@@ -47,46 +28,30 @@ pub async fn test_gossip() {
             let active_state = ActiveAuthority::new(inner_state, inner_clients).unwrap();
             active_state.spawn_all_active_processes().await;
         });
+
         active_authorities.push(handle);
     }
-    println!(
-        "after launching active, time is {:?}\n",
-        tokio::time::Instant::now()
-    );
     tokio::time::sleep(Duration::from_secs(1)).await;
-    println!("now time is {:?}\n", tokio::time::Instant::now());
 
-    for state in states {
-        let result1 = state._database.transaction_exists(&digest1);
-        let result2 = state._database.transaction_exists(&digest2);
-        let result3 = state._database.transaction_exists(&digest3);
+    // Expected outcome of gossip: each digest's tx signature and cert is now on every authority.
+    let clients_final: Vec<_> = clients.values().collect();
+    for client in clients_final.iter() {
+        for digest in &digests {
+            debug!("Checking the digest:   {:?}   ------ ", digest);
+            let result1 = client
+                .handle_transaction_info_request(TransactionInfoRequest {
+                    transaction_digest: *digest,
+                })
+                .await;
 
-        assert!(result1.is_ok());
-        assert!(result1.unwrap());
-        assert!(result2.is_ok());
-        assert!(result2.unwrap());
-        assert!(result3.is_ok());
-        assert!(result3.unwrap());
-    }
-
-    for handle in active_authorities {
-        handle.abort();
-    }
-}
-
-#[tokio::test]
-pub async fn advance_time() {
-    println!("time is {:?}\n", tokio::time::Instant::now());
-    let duration = Duration::from_secs(5);
-    let mut timeout = Box::pin(tokio::time::sleep(duration));
-    loop {
-        select! {
-             _ = &mut timeout => {
-                break;
-             }
+            assert!(result1.is_ok());
+            let result = result1.unwrap();
+            let found_tx = result.signed_transaction.is_some();
+            let found_cert = result.certified_transaction.is_some();
+            debug!("found tx {:?}", found_tx);
+            debug!("found cert {:?}", found_cert);
         }
     }
-    println!("now time is {:?}\n", tokio::time::Instant::now());
 }
 
 #[tokio::test]

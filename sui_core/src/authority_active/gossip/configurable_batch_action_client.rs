@@ -1,19 +1,24 @@
 use crate::authority::AuthorityState;
-use crate::authority_aggregator::AuthorityAggregator;
+use crate::authority::AuthorityStore;
+use crate::authority_aggregator::{authority_aggregator_tests::*, AuthorityAggregator};
 use crate::authority_client::{AuthorityAPI, BatchInfoResponseItemStream};
 use async_trait::async_trait;
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use sui_types::base_types::{ObjectID, TransactionDigest};
+use std::{env, fs};
+use sui_adapter::genesis;
+use sui_types::base_types::*;
 use sui_types::batch::{AuthorityBatch, SignedBatch, TxSequenceNumber, UpdateItem};
-use sui_types::committee::{Committee, EpochId};
-use sui_types::crypto::{get_key_pair, AuthoritySignature, KeyPair, PublicKeyBytes};
+use sui_types::committee::Committee;
+use sui_types::crypto::{get_key_pair, KeyPair, PublicKeyBytes};
 use sui_types::error::SuiError;
 use sui_types::messages::{
     AccountInfoRequest, AccountInfoResponse, BatchInfoRequest, BatchInfoResponseItem,
-    CertifiedTransaction, ConfirmationTransaction, ConsensusTransaction, ObjectInfoRequest,
-    ObjectInfoResponse, Transaction, TransactionInfoRequest, TransactionInfoResponse,
+    ConfirmationTransaction, ConsensusTransaction, ObjectInfoRequest, ObjectInfoResponse,
+    Transaction, TransactionInfoRequest, TransactionInfoResponse,
 };
+use sui_types::object::Object;
 use tokio::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -25,22 +30,24 @@ pub struct TestBatch {
 #[derive(Clone)]
 pub enum BatchAction {
     DoNothing(Duration),
+    EmitUpdateItem(),
+}
+
+#[derive(Clone)]
+pub enum BatchActionInternal {
+    DoNothing(Duration),
     EmitUpdateItems(TestBatch),
 }
 
 #[derive(Clone)]
 pub struct ConfigurableBatchActionClient {
     state: Arc<AuthorityState>,
-    pub action_sequence: Vec<BatchAction>,
+    pub action_sequence_internal: Vec<BatchActionInternal>,
 }
 
 impl ConfigurableBatchActionClient {
     #[cfg(test)]
     pub async fn new(committee: Committee, address: PublicKeyBytes, secret: KeyPair) -> Self {
-        use crate::authority::AuthorityStore;
-        use std::{env, fs};
-        use sui_adapter::genesis;
-
         // Random directory
         let dir = env::temp_dir();
         let path = dir.join(format!("DB_{:?}", ObjectID::random()));
@@ -59,25 +66,13 @@ impl ConfigurableBatchActionClient {
 
         ConfigurableBatchActionClient {
             state: Arc::new(state),
-            action_sequence: Vec::new(),
+            action_sequence_internal: Vec::new(),
         }
     }
 
     #[cfg(test)]
-    pub async fn new_with_actions(
-        committee: Committee,
-        address: PublicKeyBytes,
-        secret: KeyPair,
-        actions: Vec<BatchAction>,
-    ) -> Self {
-        let mut client = Self::new(committee, address, secret).await;
-        client.register_action_sequence(actions);
-        client
-    }
-
-    #[cfg(test)]
-    pub fn register_action_sequence(&mut self, action_sequence: Vec<BatchAction>) {
-        self.action_sequence = action_sequence;
+    pub fn register_action_sequence(&mut self, actions: Vec<BatchActionInternal>) {
+        self.action_sequence_internal = actions;
     }
 }
 
@@ -93,13 +88,11 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
 
     async fn handle_confirmation_transaction(
         &self,
-        _transaction: ConfirmationTransaction,
+        transaction: ConfirmationTransaction,
     ) -> Result<TransactionInfoResponse, SuiError> {
-        Ok(TransactionInfoResponse {
-            signed_transaction: None,
-            certified_transaction: None,
-            signed_effects: None,
-        })
+        let state = self.state.clone();
+        let result = state.handle_confirmation_transaction(transaction).await;
+        result
     }
 
     async fn handle_consensus_transaction(
@@ -125,25 +118,20 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
 
     async fn handle_object_info_request(
         &self,
-        _request: ObjectInfoRequest,
+        request: ObjectInfoRequest,
     ) -> Result<ObjectInfoResponse, SuiError> {
-        Ok(ObjectInfoResponse {
-            parent_certificate: None,
-            requested_object_reference: None,
-            object_and_lock: None,
-        })
+        let state = self.state.clone();
+        let x = state.handle_object_info_request(request).await;
+        x
     }
 
     /// Handle Object information requests for this account.
     async fn handle_transaction_info_request(
         &self,
-        _request: TransactionInfoRequest,
+        request: TransactionInfoRequest,
     ) -> Result<TransactionInfoResponse, SuiError> {
-        Ok(TransactionInfoResponse {
-            signed_transaction: None,
-            certified_transaction: None,
-            signed_effects: None,
-        })
+        let result = self.state.handle_transaction_info_request(request).await;
+        result
     }
 
     /// Handle Batch information requests for this authority.
@@ -152,14 +140,14 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
         _request: BatchInfoRequest,
     ) -> Result<BatchInfoResponseItemStream, SuiError> {
         let mut last_batch = AuthorityBatch::initial();
-        let actions = &self.action_sequence;
+        let actions = &self.action_sequence_internal;
         let secret = self.state.secret.clone();
         let name = self.state.name;
         let mut items: Vec<Result<BatchInfoResponseItem, SuiError>> = Vec::new();
 
         let _ = actions.into_iter().for_each(|action| {
             match action {
-                BatchAction::EmitUpdateItems(test_batch) => {
+                BatchActionInternal::EmitUpdateItems(test_batch) => {
                     let mut temp_items: Vec<Result<BatchInfoResponseItem, SuiError>> = Vec::new();
                     let start_seq = test_batch.start;
                     let mut seq = start_seq;
@@ -182,7 +170,7 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
                         items.push(temp_item)
                     }
                 }
-                BatchAction::DoNothing(_d) => {}
+                BatchActionInternal::DoNothing(_d) => {}
             };
         });
 
@@ -192,12 +180,23 @@ impl AuthorityAPI for ConfigurableBatchActionClient {
 
 #[cfg(test)]
 pub async fn init_configurable_authorities(
-    authority_count: usize,
-    authority_actions: Vec<Vec<BatchAction>>,
+    authority_action: Vec<BatchAction>,
 ) -> (
-    AuthorityAggregator<ConfigurableBatchActionClient>,
+    BTreeMap<AuthorityName, ConfigurableBatchActionClient>,
     Vec<Arc<AuthorityState>>,
+    Vec<TransactionDigest>,
 ) {
+    let authority_count = 4;
+    let (addr1, key1) = get_key_pair();
+
+    let gas_object1 = Object::with_owner_for_testing(addr1);
+    let gas_object2 = Object::with_owner_for_testing(addr1);
+    let genesis_objects = authority_genesis_objects(
+        authority_count,
+        vec![gas_object1.clone(), gas_object2.clone()],
+    );
+
+    // Create committee.
     let mut key_pairs = Vec::new();
     let mut voting_rights = BTreeMap::new();
     for _ in 0..authority_count {
@@ -208,18 +207,83 @@ pub async fn init_configurable_authorities(
     }
     let committee = Committee::new(0, voting_rights);
 
-    let mut clients = BTreeMap::new();
+    // Create Authority Clients and States.
+    let mut clients = Vec::new();
+    let mut names = Vec::new();
     let mut states = Vec::new();
-    for ((authority_name, secret), actions) in key_pairs.into_iter().zip(authority_actions) {
-        let client = ConfigurableBatchActionClient::new_with_actions(
-            committee.clone(),
-            authority_name,
-            secret,
-            actions,
-        )
-        .await;
+    for ((authority_name, secret), objects) in key_pairs.into_iter().zip(genesis_objects) {
+        let client =
+            ConfigurableBatchActionClient::new(committee.clone(), authority_name, secret).await;
+        for object in objects {
+            client.state.insert_genesis_object(object).await;
+        }
         states.push(client.state.clone());
-        clients.insert(authority_name, client);
+        names.push(authority_name);
+        clients.push(client);
     }
-    (AuthorityAggregator::new(committee, clients), states)
+
+    // Execute transactions for every EmitUpdateItem Action, use the digest of the transaction to
+    // create a batch action internal sequence.
+    let mut executed_digests = Vec::new();
+    let mut batch_action_internal = Vec::new();
+    let mut seq = 1;
+    let framework_obj_ref = genesis::get_framework_object_ref();
+
+    for action in authority_action {
+        if let BatchAction::EmitUpdateItem() = action {
+            let temp_client = clients[3].borrow();
+            let gas_ref_1 = get_latest_ref(temp_client, gas_object1.id()).await;
+            let create1 = crate_object_move_transaction(
+                addr1,
+                &key1,
+                addr1,
+                100,
+                framework_obj_ref,
+                gas_ref_1,
+            );
+
+            for i in 1..authority_count {
+                let tx_client = clients[i].borrow();
+                // Do transactions.
+                do_transaction(tx_client, &create1).await;
+            }
+
+            // Add the digest and number to the internal actions.
+            let t_b = TestBatch {
+                start: seq,
+                digests: vec![*create1.digest()],
+            };
+            batch_action_internal.push(BatchActionInternal::EmitUpdateItems(t_b));
+            executed_digests.push(create1.digest().clone());
+            seq += 1;
+        }
+    }
+    // Register the internal actions to a client
+    let client_with_actions: &mut ConfigurableBatchActionClient = clients.last_mut().unwrap();
+    client_with_actions.register_action_sequence(batch_action_internal);
+
+    // Create BtreeMap of names to clients.
+    let mut authority_clients = BTreeMap::new();
+    for (name, client) in names.into_iter().zip(clients) {
+        authority_clients.insert(name, client);
+    }
+
+    for digest in executed_digests.clone() {
+        // Get a cert
+        let authority_clients_ref: Vec<_> = authority_clients.values().collect();
+        let authority_clients_slice = authority_clients_ref.as_slice();
+        let cert1 = extract_cert(authority_clients_slice, &committee, &digest).await;
+
+        // Submit the cert to 2f+1 authorities.
+        let mut f = true;
+        for (_, cert_client) in authority_clients.iter_mut() {
+            if f {
+                f = false;
+                continue;
+            }
+            _ = do_cert(cert_client, &cert1).await;
+        }
+    }
+
+    (authority_clients, states, executed_digests)
 }
