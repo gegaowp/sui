@@ -35,7 +35,7 @@ pub struct SimpleFaucet {
     wallet: WalletContext,
     active_address: SuiAddress,
     producer: Mutex<Sender<ObjectID>>,
-    consumer: Mutex<Receiver<ObjectID>>,
+    consumer: Receiver<ObjectID>,
     metrics: FaucetMetrics,
 }
 
@@ -90,84 +90,68 @@ impl SimpleFaucet {
             wallet,
             active_address,
             producer: Mutex::new(producer),
-            consumer: Mutex::new(consumer),
+            consumer,
             metrics,
         })
     }
 
-    async fn prepare_gas_coin(&self, total_amount: u64, uuid: Uuid) -> GasCoinResponse {
+    async fn prepare_gas_coin(&mut self, total_amount: u64, uuid: Uuid) -> GasCoinResponse {
         // If the gas candidate queue is exhausted, the request will be
         // suspended indefinitely until a producer puts in more candidate
-        // gas objects. At the same time, other requests will be blocked by the
-        // lock acquisition as well.
-        let consumer_res = match tokio::time::timeout(
-            Duration::from_secs(WAIT_FOR_LOCK_TIMEOUT_SEC),
-            self.consumer.lock(),
-        )
-        .await
-        {
-            Ok(guard) => Ok(guard),
-            Err(_) => {
-                error!(?uuid, "Timeout when getting consumer lock");
-                Err(anyhow::anyhow!("Too many concurrent requests, try later!"))
-            }
-        };
-        if let Ok(mut consumer) = consumer_res {
-            info!(?uuid, "Got consumer lock, pulling coins.");
-            loop {
-                match tokio::time::timeout(
-                    Duration::from_secs(WAIT_FOR_GAS_TIMEOUT_SEC),
-                    consumer.recv(),
-                )
-                .await
-                {
-                    Ok(Some(coin)) => {
-                        info!(?uuid, "Pulling coin from pool {:?}", coin);
-                        self.metrics.total_available_coins.dec();
-                        match self.get_gas_coin(coin).await {
-                            Ok(Some(gas_coin))
-                                if gas_coin.value() >= total_amount + PAY_SUI_GAS =>
-                            {
-                                info!(
-                                    ?uuid,
-                                    "Planning to use coin from pool {:?}, current balance: {}",
-                                    coin,
-                                    gas_coin.value()
-                                );
-                                return GasCoinResponse::ValidGasCoin(coin);
-                            }
-                            Ok(Some(_)) => {
-                                warn!(
-                                    ?uuid,
-                                    "Coin {:?} does not have sufficient balance, removing from pool", coin
-                                );
-                                return GasCoinResponse::GasCoinWithInsufficientBalance(coin);
-                            }
-                            Ok(None) => {
-                                // Invalid gas, meaning that the coin does not exist,
-                                // or does not belong to the current active address.
-                                self.metrics.total_discarded_coins.inc();
-                                warn!(?uuid, "Coin {:?} is not valid, removing from pool", coin);
-                                return GasCoinResponse::InvalidGasCoin(coin);
-                            }
-                            Err(e) => {
-                                error!(
-                                    ?uuid,
-                                    "Cannot read gas coin object {:?} from Fullnode with err: {:?}",
-                                    coin,
-                                    e
-                                );
-                                return GasCoinResponse::UnknownGasCoin(coin);
-                            }
+        // gas objects.
+        info!(?uuid, "Got consumer lock, pulling coins.");
+        loop {
+            match tokio::time::timeout(
+                Duration::from_secs(WAIT_FOR_GAS_TIMEOUT_SEC),
+                self.consumer.recv(),
+            )
+            .await
+            {
+                Ok(Some(coin)) => {
+                    info!(?uuid, "Pulling coin from pool {:?}", coin);
+                    self.metrics.total_available_coins.dec();
+                    match self.get_gas_coin(coin).await {
+                        Ok(Some(gas_coin)) if gas_coin.value() >= total_amount + PAY_SUI_GAS => {
+                            info!(
+                                ?uuid,
+                                "Planning to use coin from pool {:?}, current balance: {}",
+                                coin,
+                                gas_coin.value()
+                            );
+                            return GasCoinResponse::ValidGasCoin(coin);
+                        }
+                        Ok(Some(_)) => {
+                            warn!(
+                                ?uuid,
+                                "Coin {:?} does not have sufficient balance, removing from pool",
+                                coin
+                            );
+                            return GasCoinResponse::GasCoinWithInsufficientBalance(coin);
+                        }
+                        Ok(None) => {
+                            // Invalid gas, meaning that the coin does not exist,
+                            // or does not belong to the current active address.
+                            self.metrics.total_discarded_coins.inc();
+                            warn!(?uuid, "Coin {:?} is not valid, removing from pool", coin);
+                            return GasCoinResponse::InvalidGasCoin(coin);
+                        }
+                        Err(e) => {
+                            error!(
+                                ?uuid,
+                                "Cannot read gas coin object {:?} from Fullnode with err: {:?}",
+                                coin,
+                                e
+                            );
+                            return GasCoinResponse::UnknownGasCoin(coin);
                         }
                     }
-                    Ok(None) => {
-                        unreachable!("channel is closed");
-                    }
-                    Err(_) => {
-                        error!(?uuid, "Timeout when getting gas coin from the queue");
-                        break;
-                    }
+                }
+                Ok(None) => {
+                    unreachable!("channel is closed");
+                }
+                Err(_) => {
+                    error!(?uuid, "Timeout when getting gas coin from the queue");
+                    break;
                 }
             }
         }
@@ -204,7 +188,7 @@ impl SimpleFaucet {
     }
 
     async fn transfer_gases(
-        &self,
+        &mut self,
         amounts: &[u64],
         recipient: SuiAddress,
         uuid: Uuid,
@@ -453,17 +437,17 @@ impl SimpleFaucet {
     #[cfg(test)]
     async fn drain_gas_queue(&mut self, expected_gas_count: usize) -> HashSet<ObjectID> {
         use tokio::sync::mpsc::error::TryRecvError;
-        let mut consumer = self.consumer.lock().await;
         let mut candidates = HashSet::new();
         let mut i = 0;
         loop {
-            let coin_id = consumer
+            let coin_id = self
+                .consumer
                 .try_recv()
                 .unwrap_or_else(|e| panic!("Expect the {}th candidate but got {}", i, e));
             candidates.insert(coin_id);
             i += 1;
             if i == expected_gas_count {
-                assert_eq!(consumer.try_recv().unwrap_err(), TryRecvError::Empty);
+                assert_eq!(self.consumer.try_recv().unwrap_err(), TryRecvError::Empty);
                 break;
             }
         }
