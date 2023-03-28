@@ -241,7 +241,11 @@ pub mod pg_integration_test {
         wait_until_next_checkpoint(&store).await;
         let (tx_response, _, _, _) =
             execute_simple_transfer(&mut test_cluster, &indexer_rpc_client).await?;
-        wait_until_transaction_synced(&store, tx_response.digest.base58_encode().as_str()).await;
+        wait_until_transaction_synced_in_checkpoint(
+            &store,
+            tx_response.digest.base58_encode().as_str(),
+        )
+        .await;
         let tx_count = store
             .get_total_transaction_number_from_checkpoints()
             .unwrap();
@@ -543,7 +547,6 @@ pub mod pg_integration_test {
     }
 
     #[tokio::test]
-    #[timeout(60000)]
     async fn test_get_object_with_options() -> Result<(), anyhow::Error> {
         let (test_cluster, indexer_rpc_client, store, _handle) = start_test_cluster(None).await;
         wait_until_next_checkpoint(&store).await;
@@ -573,8 +576,11 @@ pub mod pg_integration_test {
             None,
         )
         .await?;
-        wait_until_transaction_synced(&store, tx_response.digest.base58_encode().as_str()).await;
-        wait_until_next_checkpoint(&store).await;
+        wait_until_transaction_synced_in_checkpoint(
+            &store,
+            tx_response.digest.base58_encode().as_str(),
+        )
+        .await;
         let response = indexer_rpc_client
             .get_object(source_object_id, Some(show_all_content.clone()))
             .await?;
@@ -700,7 +706,11 @@ pub mod pg_integration_test {
             &test_cluster.get_address_1(),
         )
         .await?;
-        wait_until_transaction_synced(&store, tx_response.digest.base58_encode().as_str()).await;
+        wait_until_transaction_synced_in_checkpoint(
+            &store,
+            tx_response.digest.base58_encode().as_str(),
+        )
+        .await;
         wait_until_next_checkpoint(&store).await;
 
         let resp = indexer_rpc_client
@@ -1019,7 +1029,6 @@ pub mod pg_integration_test {
             .collect::<Vec<_>>();
         let mut pg_pool_conn = get_pg_pool_connection(&pg_connection_pool).unwrap();
         let insert_update_query = compose_object_bulk_insert_update_query(&bulk_data);
-        eprintln!("insert_update_query: {}", insert_update_query);
         let result: Result<usize, IndexerError> = pg_pool_conn
             .build_transaction()
             .serializable()
@@ -1037,7 +1046,11 @@ pub mod pg_integration_test {
         wait_until_next_checkpoint(&store).await;
         let (tx_response, _, _, _) =
             execute_simple_transfer(&mut test_cluster, &indexer_rpc_client).await?;
-        wait_until_transaction_synced(&store, tx_response.digest.base58_encode().as_str()).await;
+        wait_until_transaction_synced_in_checkpoint(
+            &store,
+            tx_response.digest.base58_encode().as_str(),
+        )
+        .await;
         let full_transaction_response = indexer_rpc_client
             .get_transaction(
                 tx_response.digest,
@@ -1125,12 +1138,16 @@ pub mod pg_integration_test {
             execute_simple_transfer(&mut test_cluster, &indexer_rpc_client)
                 .await
                 .unwrap();
-        wait_until_transaction_synced(&store, tx_response.digest.base58_encode().as_str()).await;
+        wait_until_transaction_synced_in_checkpoint(
+            &store,
+            tx_response.digest.base58_encode().as_str(),
+        )
+        .await;
         // We do this as checkpoint field is only returned in the read api
         let tx_response = indexer_rpc_client
             .get_transaction(
                 tx_response.digest,
-                Some(SuiTransactionResponseOptions::full_content()),
+                Some(SuiTransactionResponseOptions::new()),
             )
             .await?;
         let next_cp = tx_response.checkpoint.unwrap();
@@ -1247,6 +1264,23 @@ pub mod pg_integration_test {
             }
             tokio::task::yield_now().await;
             tx = store.get_transaction_by_digest(tx_digest);
+        }
+    }
+
+    async fn wait_until_transaction_synced_in_checkpoint(store: &PgIndexerStore, tx_digest: &str) {
+        let since = std::time::Instant::now();
+        loop {
+            let tx = store.get_transaction_by_digest(tx_digest);
+            if let Ok(t) = tx {
+                if t.checkpoint_sequence_number.is_some() {
+                    break;
+                }
+            }
+            let now = std::time::Instant::now();
+            if now.duration_since(since).as_secs() > WAIT_UNTIL_TIME_LIMIT {
+                panic!("wait_until_transaction_synced timed out!");
+            }
+            tokio::task::yield_now().await;
         }
     }
 

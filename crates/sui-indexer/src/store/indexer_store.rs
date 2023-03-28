@@ -5,7 +5,8 @@ use async_trait::async_trait;
 
 use sui_json_rpc_types::{
     Checkpoint as RpcCheckpoint, CheckpointId, EpochInfo, EventFilter, EventPage, MoveCallMetrics,
-    NetworkMetrics, SuiObjectData, SuiObjectDataFilter, SuiTransactionResponseOptions,
+    NetworkMetrics, SuiObjectData, SuiObjectDataFilter, SuiTransactionResponse,
+    SuiTransactionResponseOptions,
 };
 use sui_types::base_types::{EpochId, ObjectID, SequenceNumber};
 use sui_types::digests::CheckpointDigest;
@@ -25,7 +26,7 @@ use crate::models::packages::Package;
 use crate::models::system_state::{DBSystemStateSummary, DBValidatorSummary};
 use crate::models::transaction_index::{InputObject, MoveCall, Recipient};
 use crate::models::transactions::Transaction;
-use crate::types::SuiTransactionFullResponse;
+use crate::types::CheckpointTransactionResponse;
 
 #[async_trait]
 pub trait IndexerStore {
@@ -70,11 +71,11 @@ pub trait IndexerStore {
         tx_digests: &[String],
     ) -> Result<Vec<Transaction>, IndexerError>;
 
-    async fn compose_full_transaction_response(
+    async fn compose_sui_transaction_response(
         &self,
         tx: Transaction,
         options: Option<SuiTransactionResponseOptions>,
-    ) -> Result<SuiTransactionFullResponse, IndexerError>;
+    ) -> Result<SuiTransactionResponse, IndexerError>;
 
     fn get_all_transaction_digest_page(
         &self,
@@ -168,6 +169,7 @@ pub trait IndexerStore {
     fn get_network_metrics(&self) -> Result<NetworkMetrics, IndexerError>;
     fn get_move_call_metrics(&self) -> Result<MoveCallMetrics, IndexerError>;
 
+    fn persist_fast_path(&self, tx: Transaction) -> Result<usize, IndexerError>;
     fn persist_checkpoint(&self, data: &TemporaryCheckpointStore) -> Result<usize, IndexerError>;
     fn persist_epoch(&self, data: &TemporaryEpochStore) -> Result<(), IndexerError>;
 
@@ -186,7 +188,7 @@ pub trait IndexerStore {
 #[derive(Clone, Debug)]
 pub struct CheckpointData {
     pub checkpoint: RpcCheckpoint,
-    pub transactions: Vec<SuiTransactionFullResponse>,
+    pub transactions: Vec<CheckpointTransactionResponse>,
     pub changed_objects: Vec<(ObjectStatus, SuiObjectData)>,
 }
 

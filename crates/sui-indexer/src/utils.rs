@@ -24,7 +24,7 @@ use sui_types::object::Owner;
 use sui_types::storage::{DeleteKind, WriteKind};
 
 use crate::errors::IndexerError;
-use crate::types::SuiTransactionFullResponse;
+use crate::types::CheckpointTransactionResponse;
 use crate::PgPoolConnection;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -81,7 +81,7 @@ pub fn drop_all_tables(conn: &mut PgConnection) -> Result<(), diesel::result::Er
 pub async fn multi_get_full_transactions(
     read_api: &SuiReadApi,
     digests: Vec<TransactionDigest>,
-) -> Result<Vec<SuiTransactionFullResponse>, IndexerError> {
+) -> Result<Vec<CheckpointTransactionResponse>, IndexerError> {
     let sui_transactions = read_api
         .multi_get_transactions_with_options(
             digests.clone(),
@@ -100,9 +100,9 @@ pub async fn multi_get_full_transactions(
                 e
             ))
         })?;
-    let sui_full_transactions: Vec<SuiTransactionFullResponse> = sui_transactions
+    let sui_full_transactions: Vec<CheckpointTransactionResponse> = sui_transactions
         .into_iter()
-        .map(SuiTransactionFullResponse::try_from)
+        .map(CheckpointTransactionResponse::try_from)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             IndexerError::FullNodeReadingError(format!(
