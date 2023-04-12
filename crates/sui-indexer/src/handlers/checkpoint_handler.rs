@@ -222,6 +222,11 @@ where
                 }
             }
             next_cursor_sequence_number += downloaded_checkpoints.len() as i64;
+            info!(
+                "Downloaded {} object checkpoints in parallel, next cursor sequence number: {}",
+                downloaded_checkpoints.len(),
+                next_cursor_sequence_number
+            );
             // NOTE: with this line, we can make sure that:
             // - when indexer is way behind and catching up, we download MAX_PARALLEL_DOWNLOADS checkpoints in parallel;
             // - when indexer is up to date, we download at least one checkpoint at a time.
@@ -254,6 +259,7 @@ where
             let object_sender_guard = self.object_checkpoint_sender.lock().await;
             // NOTE: when the channel is full, checkpoint_sender_guard will wait until the channel has space.
             // Also add new checkpoint sequentially to stick to checkpoint order.
+            let indexed_checkpoint_count = indexed_checkpoints.len();
             for indexed_checkpoint in indexed_checkpoints {
                 object_sender_guard
                 .send(indexed_checkpoint)
@@ -263,6 +269,10 @@ where
                     IndexerError::MpscChannelError(e.to_string())
                 })?;
             }
+            info!(
+                "Sent {} object checkpoints to channel.",
+                indexed_checkpoint_count
+            );
             drop(object_sender_guard);
         }
     }
@@ -297,6 +307,11 @@ where
                     break;
                 }
             }
+            info!(
+                "Downloaded {} checkpoints in parallel, next cursor sequence number: {}",
+                downloaded_checkpoints.len(),
+                next_cursor_sequence_number
+            );
 
             next_cursor_sequence_number += downloaded_checkpoints.len() as i64;
             // NOTE: with this line, we can make sure that:
@@ -333,6 +348,7 @@ where
             let checkpoint_sender_guard = self.checkpoint_sender.lock().await;
             // NOTE: when the channel is full, checkpoint_sender_guard will wait until the channel has space.
             // Also add new checkpoint sequentially to stick to checkpoint order.
+            let indexed_checkpoints_count = indexed_checkpoints.len();
             for indexed_checkpoint in indexed_checkpoints {
                 checkpoint_sender_guard
                 .send(indexed_checkpoint)
@@ -342,6 +358,7 @@ where
                     IndexerError::MpscChannelError(e.to_string())
                 })?;
             }
+            info!("Sent {} checkpoints to channel.", indexed_checkpoints_count);
             drop(checkpoint_sender_guard);
 
             for epoch in indexed_epochs.into_iter().flatten() {
@@ -356,10 +373,12 @@ where
                     }
                     self.state.persist_epoch(&epoch).await?;
                     epoch_db_guard.stop_and_record();
+                    info!("Persisted first epoch.");
                     self.metrics.total_epoch_committed.inc();
                 } else {
                     let epoch_sender_guard = self.epoch_sender.lock().await;
                     // NOTE: when the channel is full, epoch_sender_guard will wait until the channel has space.
+                    let epoch_number = epoch.new_epoch.epoch;
                     epoch_sender_guard.send(epoch).await.map_err(|e| {
                         error!(
                             "Failed to send indexed epoch to epoch commit handler with error {}",
@@ -368,6 +387,7 @@ where
                         IndexerError::MpscChannelError(e.to_string())
                     })?;
                     drop(epoch_sender_guard);
+                    info!("Sent epoch {} to channel.", epoch_number);
                 }
             }
 
@@ -382,6 +402,10 @@ where
                 }
                 ws_guard.stop_and_record();
             }
+            info!(
+                "Processed {} checkpoints for subscriptions.",
+                downloaded_checkpoints.len()
+            );
         }
     }
 
@@ -555,7 +579,7 @@ where
                 } = indexed_checkpoint;
                 let checkpoint_seq = checkpoint.sequence_number;
 
-                // NOTE: commit object changes in the curren task to stick to the original order.
+                // NOTE: commit object changes in the current task to stick to the original order.
                 let object_db_guard = self.metrics.object_db_commit_latency.start_timer();
                 let mut object_changes_commit_res = self
                     .state
@@ -637,6 +661,10 @@ where
         seq: CheckpointSequenceNumber,
         skip_object: bool,
     ) -> Result<CheckpointData, IndexerError> {
+        let fn_checkpoint_guard = self
+            .metrics
+            .fullnode_checkpoint_wait_and_download_latency
+            .start_timer();
         let mut checkpoint = self
             .http_client
             .get_checkpoint(seq.into())
@@ -647,10 +675,6 @@ where
                     seq, e
                 ))
             });
-        let fn_checkpoint_guard = self
-            .metrics
-            .fullnode_checkpoint_wait_and_download_latency
-            .start_timer();
         while checkpoint.is_err() {
             // sleep for 0.1 second and retry if latest checkpoint is not available yet
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -684,6 +708,11 @@ where
             Ok::<_, IndexerError>(acc)
         })?;
         fn_transaction_guard.stop_and_record();
+        info!(
+            "Downloaded {} transactions for checkpoint {}",
+            transactions.len(),
+            seq
+        );
 
         if skip_object {
             return Ok(CheckpointData {
@@ -701,6 +730,11 @@ where
         let changed_objects =
             fetch_changed_objects(self.http_client.clone(), object_changes).await?;
         fn_object_guard.stop_and_record();
+        info!(
+            "Downloaded {} changed objects for checkpoint {}",
+            changed_objects.len(),
+            seq
+        );
 
         Ok(CheckpointData {
             checkpoint,
