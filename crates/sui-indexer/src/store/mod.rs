@@ -10,6 +10,7 @@ mod indexer_store;
 mod indexer_store_v2;
 mod module_resolver;
 pub(crate) mod module_resolver_v2;
+mod partition_manager;
 mod pg_indexer_store;
 mod pg_indexer_store_v2;
 mod query;

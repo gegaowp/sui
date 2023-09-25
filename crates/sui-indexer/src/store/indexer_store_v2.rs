@@ -54,6 +54,8 @@ pub trait IndexerStoreV2 {
 
     async fn persist_epoch(&self, data: Vec<EpochToCommit>) -> Result<(), IndexerError>;
 
+    async fn advance_epoch(&self, data: Vec<EpochToCommit>) -> Result<(), IndexerError>;
+
     async fn get_network_total_transactions_by_end_of_epoch(
         &self,
         epoch: u64,

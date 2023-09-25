@@ -26,6 +26,7 @@ use crate::errors::{Context, IndexerError};
 use crate::handlers::EpochToCommit;
 use crate::handlers::TransactionObjectChangesToCommit;
 use crate::metrics::IndexerMetrics;
+use crate::store::partition_manager::{EpochPartitionData, PgPartitionManager};
 
 use crate::models_v2::checkpoints::StoredCheckpoint;
 use crate::models_v2::epoch::StoredEpochInfo;
@@ -43,6 +44,8 @@ use crate::types_v2::{
 use crate::PgConnectionPool;
 
 use super::IndexerStoreV2;
+
+const PARTITION_TABLES: [&str; 1] = ["transactions"];
 
 #[macro_export]
 macro_rules! chunk {
@@ -75,6 +78,7 @@ pub struct PgIndexerStoreV2 {
     metrics: IndexerMetrics,
     parallel_chunk_size: usize,
     parallel_objects_chunk_size: usize,
+    partition_manager: PgPartitionManager,
 }
 
 impl PgIndexerStoreV2 {
@@ -466,6 +470,15 @@ impl PgIndexerStoreV2 {
         })
     }
 
+    fn advance_epoch(&self, data: &Vec<EpochToCommit>) -> Result<(), IndexerError> {
+        let epoch_partition_data = EpochPartitionData::from(data);
+        for &table in PARTITION_TABLES.iter() {
+            self.partition_manager
+                .advance_table_epoch_partition(table, &epoch_partition_data)?;
+        }
+        Ok(())
+    }
+
     fn get_network_total_transactions_by_end_of_epoch(
         &self,
         epoch: u64,
@@ -675,6 +688,11 @@ impl IndexerStoreV2 for PgIndexerStoreV2 {
 
     async fn persist_epoch(&self, data: Vec<EpochToCommit>) -> Result<(), IndexerError> {
         self.execute_in_blocking_worker(move |this| this.persist_epoch(&data))
+            .await
+    }
+
+    async fn advance_epoch(&self, data: Vec<EpochToCommit>) -> Result<(), IndexerError> {
+        self.execute_in_blocking_worker(move |this| this.advance_epoch(&data))
             .await
     }
 
