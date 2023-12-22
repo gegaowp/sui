@@ -163,7 +163,7 @@ impl Event {
 }
 
 // Event emitted in move code `fun advance_epoch`
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SystemEpochInfoEvent {
     pub epoch: u64,
     pub protocol_version: u64,
