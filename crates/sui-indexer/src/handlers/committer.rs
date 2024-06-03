@@ -45,7 +45,8 @@ where
     let mut stream = mysten_metrics::metered_channel::ReceiverStream::new(tx_indexing_receiver)
         .ready_chunks(checkpoint_commit_batch_size);
 
-    let mut object_snapshot_backfill_mode = true;
+    // NOCOMMIT: to temp skip objects_snapshot backfill
+    let mut object_snapshot_backfill_mode = false;
     let latest_object_snapshot_seq = state
         .get_latest_object_snapshot_checkpoint_sequence_number()
         .await?;
