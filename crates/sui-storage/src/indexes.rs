@@ -741,6 +741,7 @@ impl IndexStore {
                 .skip_to(&(key.clone(), cursor.unwrap_or(TxSequenceNumber::MIN)))?
                 // skip one more if exclusive cursor is Some
                 .skip(usize::from(cursor.is_some()))
+                // to iterate only within the specified key
                 .take_while(|((id, _), _)| *id == key)
                 .map(|(_, digest)| digest);
             if let Some(limit) = limit {
