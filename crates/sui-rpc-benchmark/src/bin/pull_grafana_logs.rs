@@ -12,7 +12,7 @@ use std::error::Error;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::process;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Loki has a limit of 10000 logs per request.
 const MAX_LOGS_PER_REQUEST: u64 = 10000;
@@ -38,6 +38,8 @@ struct GrafanaLog {
     message: String,
 }
 
+/// One example message is:
+/// 2025-02-11T23:15:17.944697206Z stderr F 2025-02-11T23:15:17.944501Z  INFO sui_edge_proxy::handlers: Sampled read request headers={"host": "wallet-rpc.mainnet.sui.io", "client-sdk-type": "typescript", "client-sdk-version": "1.17.0", "client-target-api-version": "1.40.0", "client-request-method": "suix_getBalance", "content-type": "application/json", "content-length": "152", "accept-encoding": "gzip", "user-agent": "okhttp/4.9.2", "x-cloud-trace-context": "31caa7db658044d850a002ccf4ff15b1/8018737809747708392", "cookie": "_cfuvid=h0GD1bYot45Ln6kVCdL4qsFCCyw3h2cLw3caDNmhWNw-1739262948231-0.0.1.1-604800000", "via": "1.1 google", "x-forwarded-for": "171.236.184.3, 34.8.28.138", "x-forwarded-proto": "https", "connection": "Keep-Alive"} body=b"{\"jsonrpc\":\"2.0\",\"id\":189393,\"method\":\"suix_getBalance\",\"params\":[\"0x23cad599a375b9c2cedd62fa20112526c90a71764230425cb7f557c0c0b3b150\",\"0x2::sui::SUI\"]}" peer_type=Read
 fn extract_body_from_message(message: &str) -> Option<String> {
     if let Some(body_start) = message.find("body=") {
         if let Some(peer_type_start) = message.find(" peer_type=") {
@@ -93,7 +95,7 @@ async fn main() {
         .with_env()
         .init();
     if let Err(e) = run().await {
-        error!("Error: {}", e);
+        error!("{e}");
         process::exit(1);
     }
 }
@@ -180,6 +182,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     .unwrap_or("unknown_method")
                     .to_string();
                 method_map.entry(method).or_default().push(body_content);
+            } else {
+                // some requests from unknown external clients have empty body like
+                // Error parsing body: GrafanaLog { message: "2025-02-18T17:10:54.297706389Z stderr F 2025-02-18T17:10:54.297481Z  INFO sui_edge_proxy::handlers: Sampled read request headers={\"host\": \"wallet-rpc.mainnet.sui.io\", \"accept\": \"*/*\", \"access-control-request-method\": \"POST\", \"access-control-request-headers\": \"client-sdk-type,client-sdk-version,client-target-api-version,content-type\", \"origin\": \"https://birdx.birds.dog\", \"user-agent\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\", \"sec-fetch-mode\": \"cors\", \"sec-fetch-site\": \"cross-site\", \"sec-fetch-dest\": \"empty\", \"referer\": \"https://birdx.birds.dog/\", \"accept-encoding\": \"gzip, deflate, br, zstd\", \"accept-language\": \"vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5\", \"priority\": \"u=1, i\", \"x-cloud-trace-context\": \"dbfdeb48a0d6870cf7449f04925fefe3/3823670288808508819\", \"via\": \"1.1 google\", \"x-forwarded-for\": \"171.236.43.126, 34.8.28.138\", \"x-forwarded-proto\": \"https\", \"connection\": \"Keep-Alive\"} body=b\"\" peer_type=Read" }
+                warn!("Error parsing body: {:?}", log_entry);
             }
         }
     }
@@ -188,11 +194,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut writer = BufWriter::new(file);
 
     for (method, bodies) in method_map {
-        info!("Writing {} logs for method: {}", bodies.len(), method);
+        info!(len = bodies.len(), method, "Writing logs");
         for body in bodies {
-            let line = format!(r#"{{"method":"{}", "body":{}}}"#, method, body);
-            writer.write_all(line.as_bytes())?;
-            writer.write_all(b"\n")?;
+            write!(writer, r#"{{"method":"{method}", "body":"#)?;
+            writer.write_all(body.as_bytes())?;
+            writeln!(writer, "}}")?;
         }
     }
 
