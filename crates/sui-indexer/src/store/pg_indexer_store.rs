@@ -1275,6 +1275,7 @@ impl PgIndexerStore {
             if let Some(last_epoch) = last_db_epoch {
                 let epoch_partition_data =
                     EpochPartitionData::compose_data(epoch_to_commit, last_epoch);
+                tracing::error!("Epoch partition data: {:?} and end of epoch: {}", epoch_partition_data, last_epoch_id);
                 let table_partitions = self.partition_manager.get_table_partitions().await?;
                 for (table, (_, last_partition)) in table_partitions {
                     // Only advance epoch partition for epoch partitioned tables.

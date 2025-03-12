@@ -1,0 +1,15 @@
+✅ Iteration 4 passed (32 seconds)
+✅ Iteration 4 passed (32 seconds)
+✅ Iteration 4 passed (32 seconds)
+=== Iteration 5 ===
+=== Iteration 5 ===
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+=== Iteration 5 ===
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache

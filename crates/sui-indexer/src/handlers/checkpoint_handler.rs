@@ -209,6 +209,7 @@ impl CheckpointHandler {
             1 => Ok(0),
             _ => {
                 let last_epoch = system_state_summary.epoch - 2;
+                tracing::error!("Getting network total transactions for epoch {}", last_epoch);
                 state
                     .get_network_total_transactions_by_end_of_epoch(last_epoch)
                     .await?
@@ -220,6 +221,8 @@ impl CheckpointHandler {
                     })
             }
         }?;
+        tracing::error!("first_tx_sequence_number: {}", first_tx_sequence_number);
+        tracing::error!("network_total_transactions: {}", checkpoint_summary.network_total_transactions);
 
         let epoch_end_info = EpochEndInfo::new(epoch_event_opt.as_ref());
         let epoch_start_info = EpochStartInfo::new(
